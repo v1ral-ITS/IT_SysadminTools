@@ -20,6 +20,57 @@ def _real_user_home():
     return os.path.expanduser("~")
 
 
+def _log_dir():
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if not state_home:
+        state_home = os.path.join(_real_user_home(), ".local", "state")
+    return os.path.join(state_home, "IT_SysadminTools", "logs")
+
+
+def _open_log():
+    log_dir = _log_dir()
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError:
+        return None
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(log_dir, f"IT_Backupmanager-{stamp}.log")
+    try:
+        f = open(log_path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return None
+    # If running under sudo, fix ownership so the real user can read it later.
+    sudo_uid = os.environ.get("SUDO_UID")
+    sudo_gid = os.environ.get("SUDO_GID")
+    if sudo_uid and sudo_gid:
+        try:
+            os.chown(log_dir, int(sudo_uid), int(sudo_gid))
+            os.chown(log_path, int(sudo_uid), int(sudo_gid))
+        except (OSError, ValueError):
+            pass
+    print(f"Logging to: {log_path}")
+    return f
+
+
+class _Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except Exception:
+                pass
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
 _DRY_RUN_ON_ARGV = any(arg in ("--dry-run", "-n") for arg in sys.argv[1:])
 
 # Auto elevate to root like: [ "$UID" -eq 0 ] || exec sudo "$0" "$@"
@@ -863,6 +914,14 @@ def main():
         help="Show the commands that would run without executing them.",
     )
     args, _unknown = parser.parse_known_args()
+
+    log_file = _open_log()
+    if log_file is not None:
+        sys.stdout = _Tee(sys.stdout, log_file)
+        sys.stderr = _Tee(sys.stderr, log_file)
+        print(f"=== IT_Backupmanager started at {datetime.now().isoformat()} ===")
+        print(f"argv: {sys.argv}")
+        print(f"uid={os.geteuid()} euid={os.geteuid()} sudo_user={os.environ.get('SUDO_USER')}")
 
     ui = BackupUI()
     if args.dry_run:

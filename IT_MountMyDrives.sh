@@ -7,6 +7,42 @@ set -uo pipefail
 
 PROG_NAME="$(basename "$0")"
 
+log_dir() {
+    local state_home="${XDG_STATE_HOME:-}"
+    if [[ -z "$state_home" ]]; then
+        local home_dir
+        if [[ -n "${SUDO_USER:-}" ]]; then
+            home_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        else
+            home_dir="${HOME:-/root}"
+        fi
+        state_home="$home_dir/.local/state"
+    fi
+    echo "$state_home/IT_SysadminTools/logs"
+}
+
+start_logging() {
+    local dir
+    dir="$(log_dir)"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    local stamp
+    stamp="$(date '+%Y-%m-%d_%H-%M-%S')"
+    LOG_FILE="$dir/IT_MountMyDrives-$stamp.log"
+
+    # Fix ownership if root-via-sudo so the real user can read it later.
+    if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+        chown -R "$SUDO_UID:$SUDO_GID" "$dir" 2>/dev/null || true
+    fi
+
+    echo "Logging to: $LOG_FILE"
+    # Tee all subsequent stdout/stderr into the log.
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    echo "=== IT_MountMyDrives started at $(date -Iseconds) ==="
+    echo "argv: $* (dry_run=$DRY_RUN)"
+    echo "uid=$UID sudo_user=${SUDO_USER:-}"
+}
+
 print_usage() {
     cat <<EOF
 Usage: $PROG_NAME [--config PATH] [--dry-run] [--help]
@@ -185,6 +221,8 @@ main() {
     if [[ "$UID" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
         exec sudo --preserve-env=IT_MOUNT_CONFIG,XDG_CONFIG_HOME,HOME "$0" "${ORIG_ARGS[@]}"
     fi
+
+    start_logging "${ORIG_ARGS[@]}"
 
     local config
     if ! config="$(resolve_config)"; then
