@@ -9,7 +9,7 @@ PROG_NAME="$(basename "$0")"
 
 print_usage() {
     cat <<EOF
-Usage: $PROG_NAME [--config PATH] [--help]
+Usage: $PROG_NAME [--config PATH] [--dry-run] [--help]
 
 Mount drives listed in a config file. Each non-comment line is one of:
 
@@ -26,11 +26,15 @@ Config search order (first match wins):
   4. /etc/IT_SysadminTools/mounts.conf
   5. ./mounts.conf next to this script
 
+--dry-run shows what would be mounted without actually mounting. Safe to run
+without sudo. Useful for sanity-checking a new mounts.conf.
+
 Run with --help for this message. See mounts.conf.example for a sample.
 EOF
 }
 
 CONFIG_ARG=""
+DRY_RUN=0
 ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -40,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config=*)
             CONFIG_ARG="${1#*=}"
+            shift
+            ;;
+        --dry-run|-n)
+            DRY_RUN=1
             shift
             ;;
         -h|--help)
@@ -106,7 +114,11 @@ mount_one() {
         return 1
     fi
 
-    mkdir -p "$mountpoint"
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        mkdir -p "$mountpoint"
+    elif [[ ! -d "$mountpoint" ]]; then
+        echo "[dry]  would create mountpoint $mountpoint"
+    fi
 
     if findmnt -rn -T "$mountpoint" >/dev/null 2>&1; then
         echo "[skip] $mountpoint already has something mounted on it"
@@ -117,6 +129,10 @@ mount_one() {
         label)
             dev="$(blkid -L "$identifier" 2>/dev/null || true)"
             if [[ -z "$dev" ]]; then
+                if [[ "$DRY_RUN" -eq 1 ]]; then
+                    echo "[dry]  no device with LABEL='$identifier' present right now"
+                    return 0
+                fi
                 echo "[fail] no device found with LABEL='$identifier'" >&2
                 return 1
             fi
@@ -124,6 +140,10 @@ mount_one() {
         device)
             dev="$identifier"
             if [[ ! -b "$dev" ]]; then
+                if [[ "$DRY_RUN" -eq 1 ]]; then
+                    echo "[dry]  '$dev' is not a block device right now"
+                    return 0
+                fi
                 echo "[fail] '$dev' is not a block device" >&2
                 return 1
             fi
@@ -146,6 +166,11 @@ mount_one() {
     [[ -n "$options" ]] && mount_cmd+=(-o "$options")
     mount_cmd+=("$dev" "$mountpoint")
 
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "[dry]  would run: ${mount_cmd[*]}"
+        return 0
+    fi
+
     if "${mount_cmd[@]}"; then
         echo "[ok]   mounted $dev at $mountpoint"
         return 0
@@ -156,8 +181,8 @@ mount_one() {
 }
 
 main() {
-    # Auto-elevate AFTER parsing --help/--config so the user can read help without sudo.
-    if [[ "$UID" -ne 0 ]]; then
+    # Auto-elevate AFTER parsing flags so --help and --dry-run work without sudo.
+    if [[ "$UID" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
         exec sudo --preserve-env=IT_MOUNT_CONFIG,XDG_CONFIG_HOME,HOME "$0" "${ORIG_ARGS[@]}"
     fi
 
