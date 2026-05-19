@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `IT_MountMyDrives.sh`: replace `findmnt -T "$mountpoint"` with
+  `findmnt -M "$mountpoint"`. `-T` returns the filesystem containing the path
+  (so any subdirectory of an already-mounted FS looked "already mounted"),
+  while `-M` only matches when `$mountpoint` is exactly a mount target. Cured
+  the false-positive `[skip]` on configs like `label 5_TB /mnt/5_TB` when
+  `/mnt/5_TB` was a plain directory on the root filesystem.
+- `IT_MountMyDrives.sh`: pass `-c /dev/null` to `blkid -L` so label lookup
+  bypasses the on-disk cache (`/run/blkid/blkid.tab`). A drive that was
+  previously labeled `5_TB` and later relabeled (e.g., to `KALI_DATA`) could
+  still be returned for `blkid -L 5_TB` from the stale cache, causing the
+  script to report the wrong device as "already mounted at $other_target".
+
 ## [0.2.0] - 2026-05-19
 
 ### Added

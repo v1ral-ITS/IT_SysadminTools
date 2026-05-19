@@ -156,14 +156,14 @@ mount_one() {
         echo "[dry]  would create mountpoint $mountpoint"
     fi
 
-    if findmnt -rn -T "$mountpoint" >/dev/null 2>&1; then
-        echo "[skip] $mountpoint already has something mounted on it"
+    if findmnt -rn -M "$mountpoint" >/dev/null 2>&1; then
+        echo "[skip] $mountpoint is already a mountpoint"
         return 0
     fi
 
     case "$kind" in
         label)
-            dev="$(blkid -L "$identifier" 2>/dev/null || true)"
+            dev="$(blkid -L "$identifier" -c /dev/null 2>/dev/null || true)"
             if [[ -z "$dev" ]]; then
                 if [[ "$DRY_RUN" -eq 1 ]]; then
                     echo "[dry]  no device with LABEL='$identifier' present right now"
