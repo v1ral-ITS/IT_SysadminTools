@@ -1,0 +1,19 @@
+# IT_MountMyDrives.sh configuration
+#
+# One entry per line. Lines starting with '#' or blank lines are ignored.
+# Anything after a '#' on a line is also treated as a comment.
+#
+# Two entry kinds:
+#
+#   label  <FS_LABEL>   <MOUNTPOINT>  [fstype]   [mount_options]
+#   device <DEVICE>     <MOUNTPOINT>  [fstype]   [mount_options]
+#
+# Examples (uncomment and edit to match your system):
+
+# label  Backups        /mnt/Backups
+# label  5_TB           /mnt/5_TB
+# label  SD_CARD_INT    /mnt/SD_CARD_INT
+# label  kali-data      /mnt/kali-data
+
+# device /dev/nvme0n1p2 /mnt/WindowsOS  ntfs-3g  remove_hiberfile,rw
+# device /dev/sdb1      /mnt/usb-stick  auto     defaults,noatime
