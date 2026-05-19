@@ -48,6 +48,22 @@ See [`mounts.conf.example`](mounts.conf.example) for samples. Run with `--help` 
 
 ## Install
 
+### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/v1ral-ITS/IT_SysadminTools/main/install.sh | bash
+```
+
+Pin a specific version, or install into your home directory:
+```bash
+curl -fsSL https://raw.githubusercontent.com/v1ral-ITS/IT_SysadminTools/main/install.sh | bash -s -- --version v0.2.0
+curl -fsSL https://raw.githubusercontent.com/v1ral-ITS/IT_SysadminTools/main/install.sh | bash -s -- --prefix ~/.local
+```
+
+The installer downloads the latest `IT_Backupmanager` release binary, verifies its sha256, installs both scripts to `$PREFIX/bin`, and drops `mounts.conf.example` into `$XDG_CONFIG_HOME/IT_SysadminTools/`. Run with `--dry-run` to preview.
+
+### From source
+
 ```bash
 # Optional: build a self-contained binary with PyInstaller
 pip install pyinstaller
