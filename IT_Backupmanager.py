@@ -20,8 +20,11 @@ def _real_user_home():
     return os.path.expanduser("~")
 
 
+_DRY_RUN_ON_ARGV = any(arg in ("--dry-run", "-n") for arg in sys.argv[1:])
+
 # Auto elevate to root like: [ "$UID" -eq 0 ] || exec sudo "$0" "$@"
-if os.geteuid() != 0:
+# Skip elevation in dry-run so the user can preview commands without sudo.
+if os.geteuid() != 0 and not _DRY_RUN_ON_ARGV:
     if not shutil.which("sudo"):
         print("Error: sudo not found and not running as root.", file=sys.stderr)
         sys.exit(1)
@@ -386,8 +389,9 @@ class BackupUI:
 
 
 class BackupManager:
-    def __init__(self, ui):
+    def __init__(self, ui, dry_run=False):
         self.ui = ui
+        self.dry_run = dry_run
         self.timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     def require_root(self):
@@ -424,14 +428,16 @@ class BackupManager:
         return True
 
     def run_command(self, cmd, shell=False):
-        print("\nRunning command:\n")
-        print(cmd if isinstance(cmd, str) else " ".join(shlex.quote(x) for x in cmd))
+        rendered = cmd if isinstance(cmd, str) else " ".join(shlex.quote(x) for x in cmd)
+        label = "[DRY-RUN] would run" if self.dry_run else "Running command"
+        print(f"\n{label}:\n")
+        print(rendered)
         print()
+        if self.dry_run:
+            return True
         if shell and isinstance(cmd, str):
             # Use bash with pipefail so failures in any pipeline stage propagate.
-            result = subprocess.run(
-                ["bash", "-o", "pipefail", "-c", cmd]
-            )
+            result = subprocess.run(["bash", "-o", "pipefail", "-c", cmd])
         else:
             result = subprocess.run(cmd, shell=shell)
         return result.returncode == 0
@@ -448,6 +454,9 @@ class BackupManager:
         return os.path.join(output_dir, f"{prefix}-{self.timestamp}.{extension}")
 
     def sha256_file(self, filepath):
+        if self.dry_run or not os.path.exists(filepath):
+            return f"{filepath}.sha256 (skipped: dry-run or missing source)"
+
         sha256 = hashlib.sha256()
         with open(filepath, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -462,6 +471,8 @@ class BackupManager:
         return checksum_path
 
     def rotate_backups(self, output_dir, prefix, extension):
+        if self.dry_run:
+            return [], []
         pattern = os.path.join(output_dir, f"{prefix}-*.{extension}")
         files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
@@ -484,6 +495,8 @@ class BackupManager:
         return keep, remove
 
     def rotate_snapshot_directories(self, base_dir, prefix):
+        if self.dry_run:
+            return [], []
         pattern = os.path.join(base_dir, f"{prefix}-*")
         dirs = [p for p in glob.glob(pattern) if os.path.isdir(p)]
         dirs.sort(key=os.path.getmtime, reverse=True)
@@ -836,9 +849,34 @@ class BackupManager:
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="IT_Backupmanager",
+        description="Interactive backup and restore tool (zenity-driven).",
+        add_help=True,
+    )
+    parser.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="Show the commands that would run without executing them.",
+    )
+    args, _unknown = parser.parse_known_args()
+
     ui = BackupUI()
-    manager = BackupManager(ui)
-    manager.require_root()
+    if args.dry_run:
+        print("=" * 60)
+        print("DRY-RUN MODE: no files will be written, no commands executed.")
+        print("=" * 60)
+        ui.show_info(
+            "DRY-RUN MODE\n\nNo files will be written and no commands will be executed.\n"
+            "The terminal will show the commands that would run."
+        )
+
+    manager = BackupManager(ui, dry_run=args.dry_run)
+    if not args.dry_run:
+        manager.require_root()
 
     config = ui.get_user_input()
     manager.execute(config)
