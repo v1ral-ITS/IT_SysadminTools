@@ -9,80 +9,30 @@ import hashlib
 import subprocess
 from datetime import datetime
 
-def _real_user_home():
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        try:
-            import pwd
-            return pwd.getpwnam(sudo_user).pw_dir
-        except (KeyError, ImportError):
-            pass
-    return os.path.expanduser("~")
+
+def get_real_user() -> str:
+    return os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
 
 
-def _log_dir():
-    state_home = os.environ.get("XDG_STATE_HOME")
-    if not state_home:
-        state_home = os.path.join(_real_user_home(), ".local", "state")
-    return os.path.join(state_home, "IT_SysadminTools", "logs")
-
-
-def _open_log():
-    log_dir = _log_dir()
+def get_real_home() -> str:
+    real_user = get_real_user()
     try:
-        os.makedirs(log_dir, exist_ok=True)
-    except OSError:
-        return None
-    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(log_dir, f"IT_Backupmanager-{stamp}.log")
-    try:
-        f = open(log_path, "a", encoding="utf-8", buffering=1)
-    except OSError:
-        return None
-    # If running under sudo, fix ownership so the real user can read it later.
-    sudo_uid = os.environ.get("SUDO_UID")
-    sudo_gid = os.environ.get("SUDO_GID")
-    if sudo_uid and sudo_gid:
-        try:
-            os.chown(log_dir, int(sudo_uid), int(sudo_gid))
-            os.chown(log_path, int(sudo_uid), int(sudo_gid))
-        except (OSError, ValueError):
-            pass
-    print(f"Logging to: {log_path}")
-    return f
+        return os.path.expanduser(f"~{real_user}")
+    except Exception:
+        return os.path.expanduser("~")
 
-
-class _Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, data):
-        for s in self.streams:
-            try:
-                s.write(data)
-            except Exception:
-                pass
-
-    def flush(self):
-        for s in self.streams:
-            try:
-                s.flush()
-            except Exception:
-                pass
-
-
-_DRY_RUN_ON_ARGV = any(arg in ("--dry-run", "-n") for arg in sys.argv[1:])
 
 # Auto elevate to root like: [ "$UID" -eq 0 ] || exec sudo "$0" "$@"
-# Skip elevation in dry-run so the user can preview commands without sudo.
-if os.geteuid() != 0 and not _DRY_RUN_ON_ARGV:
-    if not shutil.which("sudo"):
-        print("Error: sudo not found and not running as root.", file=sys.stderr)
-        sys.exit(1)
-    os.execvp("sudo", ["sudo", "-E", sys.executable] + sys.argv)
-    sys.exit(1)
+if os.geteuid() != 0:
+    os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
+
 
 class BackupUI:
+    def __init__(self):
+        self.zenity_installed = shutil.which("zenity") is not None
+        if not self.zenity_installed:
+            print("Zenity is not installed, fallback to console output will be used.")
+
     def run_zenity(self, args, *, input_text=None, check=False):
         """Run zenity safely and return CompletedProcess or None on missing binary."""
         try:
@@ -100,32 +50,69 @@ class BackupUI:
             return exc
 
     def show_error(self, text):
-        if shutil.which("zenity"):
+        if self.zenity_installed:
             self.run_zenity(["--error", "--width=500", f"--text={text}"])
         else:
             print(f"ERROR: {text}", file=sys.stderr)
 
     def show_info(self, text):
-        if shutil.which("zenity"):
+        if self.zenity_installed:
             self.run_zenity(["--info", "--width=500", f"--text={text}"])
         else:
             print(text)
 
     def ask_question(self, title, text):
+        if not self.zenity_installed:
+            reply = input(f"{title}\n{text}\n[y/N]: ").strip().lower()
+            return reply in {"y", "yes"}
+
         result = self.run_zenity(
             ["--question", f"--title={title}", "--width=500", f"--text={text}"]
         )
         return result is not None and result.returncode == 0
 
-    def ask_entry(self, title, text, width=500):
-        result = self.run_zenity(
-            ["--entry", f"--title={title}", f"--width={width}", f"--text={text}"]
-        )
+    def ask_entry(self, title, text, width=500, default=""):
+        if not self.zenity_installed:
+            prompt = f"{title}\n{text}"
+            if default:
+                prompt += f"\nDefault: {default}"
+            prompt += "\n> "
+            value = input(prompt).strip()
+            return value or default
+
+        args = [
+            "--entry",
+            f"--title={title}",
+            f"--width={width}",
+            f"--text={text}",
+        ]
+        if default:
+            args.append(f"--entry-text={default}")
+
+        result = self.run_zenity(args)
         if result is None or result.returncode != 0:
             return ""
         return (result.stdout or "").strip()
 
     def ask_list(self, title, text, columns, rows, *, width=500, height=300):
+        if not self.zenity_installed:
+            print(f"\n{title}\n{text}\n")
+            options = []
+            row_width = len(columns)
+            for i in range(0, len(rows), row_width):
+                options.append(rows[i:i + row_width])
+
+            for idx, option in enumerate(options, start=1):
+                print(f"{idx}. {' | '.join(option)}")
+
+            choice = input("\nSelect number, or press Enter to cancel: ").strip()
+            if not choice.isdigit():
+                return ""
+            index = int(choice) - 1
+            if 0 <= index < len(options):
+                return options[index][0]
+            return ""
+
         args = [
             "--list",
             f"--title={title}",
@@ -136,12 +123,17 @@ class BackupUI:
         for column in columns:
             args.append(f"--column={column}")
         args.extend(rows)
+
         result = self.run_zenity(args)
         if result is None or result.returncode != 0:
             return ""
         return (result.stdout or "").strip()
 
     def ask_directory(self, title, width=650, height=400):
+        if not self.zenity_installed:
+            path = input(f"{title}\nEnter directory path: ").strip()
+            return path
+
         result = self.run_zenity(
             [
                 "--file-selection",
@@ -156,6 +148,28 @@ class BackupUI:
         return (result.stdout or "").strip()
 
     def ask_checklist(self, title, text, columns, rows, *, width=750, height=450):
+        if not self.zenity_installed:
+            print(f"\n{title}\n{text}\n")
+            selections = []
+            row_width = len(columns)
+            options = []
+            for i in range(0, len(rows), row_width):
+                options.append(rows[i:i + row_width])
+
+            for idx, option in enumerate(options, start=1):
+                print(f"{idx}. {' | '.join(option[1:])}")
+
+            raw = input("\nEnter numbers separated by commas, or press Enter to cancel: ").strip()
+            if not raw:
+                return []
+            for item in raw.split(","):
+                item = item.strip()
+                if item.isdigit():
+                    index = int(item) - 1
+                    if 0 <= index < len(options):
+                        selections.append(options[index][1])
+            return selections
+
         args = [
             "--list",
             "--checklist",
@@ -168,6 +182,7 @@ class BackupUI:
         for column in columns:
             args.append(f"--column={column}")
         args.extend(rows)
+
         result = self.run_zenity(args)
         if result is None or result.returncode != 0:
             return []
@@ -175,6 +190,24 @@ class BackupUI:
         return output.split("|") if output else []
 
     def ask_radiolist(self, title, text, columns, rows, *, width=700, height=350):
+        if not self.zenity_installed:
+            print(f"\n{title}\n{text}\n")
+            row_width = len(columns)
+            options = []
+            for i in range(0, len(rows), row_width):
+                options.append(rows[i:i + row_width])
+
+            for idx, option in enumerate(options, start=1):
+                print(f"{idx}. {' | '.join(option[1:])}")
+
+            choice = input("\nSelect number, or press Enter to cancel: ").strip()
+            if not choice.isdigit():
+                return ""
+            index = int(choice) - 1
+            if 0 <= index < len(options):
+                return options[index][1]
+            return ""
+
         args = [
             "--list",
             "--radiolist",
@@ -186,6 +219,7 @@ class BackupUI:
         for column in columns:
             args.append(f"--column={column}")
         args.extend(rows)
+
         result = self.run_zenity(args)
         if result is None or result.returncode != 0:
             return ""
@@ -219,10 +253,10 @@ class BackupUI:
             if n < 1024.0 or unit == units[-1]:
                 return f"{n:.2f} {unit}"
             n /= 1024.0
-        return f"{n:.2f} TB"
 
     def get_user_input(self):
         config = {}
+        real_home = get_real_home()
 
         main_choice = self.ask_list(
             "ImPerial TeK Solutions Backup and Restore Like a real sysAdmin:",
@@ -261,7 +295,8 @@ class BackupUI:
                 "Home Backup",
                 "Enter source directory:",
                 width=600,
-            ) or _real_user_home()
+                default=real_home,
+            )
 
             config["output_dir"] = self.ask_directory(
                 "Choose destination folder for home backup"
@@ -358,9 +393,9 @@ class BackupUI:
                 [
                     "TRUE", "/etc",
                     "TRUE", "/usr/local/bin",
-                    "TRUE", os.path.join(_real_user_home(), ".config"),
-                    "TRUE", os.path.join(_real_user_home(), ".bashrc"),
-                    "TRUE", os.path.join(_real_user_home(), ".zshrc"),
+                    "TRUE", os.path.join(real_home, ".config"),
+                    "TRUE", os.path.join(real_home, ".bashrc"),
+                    "TRUE", os.path.join(real_home, ".zshrc"),
                     "FALSE", "/boot/grub",
                 ],
             )
@@ -385,7 +420,7 @@ class BackupUI:
                 "Choose files or directories to include:",
                 ["Pick", "Path"],
                 [
-                    "TRUE", _real_user_home(),
+                    "TRUE", real_home,
                     "FALSE", "/etc",
                     "FALSE", "/usr/local/bin",
                     "FALSE", "/var/log",
@@ -440,9 +475,8 @@ class BackupUI:
 
 
 class BackupManager:
-    def __init__(self, ui, dry_run=False):
+    def __init__(self, ui):
         self.ui = ui
-        self.dry_run = dry_run
         self.timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     def require_root(self):
@@ -451,15 +485,16 @@ class BackupManager:
             sys.exit(1)
 
     def require_tools(self, *needed_tools):
-        not_avail = ""
+        missing = []
 
         for tool in needed_tools:
             if not shutil.which(tool):
-                not_avail += f" {tool}"
+                missing.append(tool)
 
-        if not_avail:
+        if missing:
             self.ui.show_error(
-                f"ERROR: The following required tool(s) cannot be found:{not_avail}"
+                "ERROR: The following required tool(s) cannot be found:\n" +
+                "\n".join(missing)
             )
             return False
 
@@ -479,18 +514,14 @@ class BackupManager:
         return True
 
     def run_command(self, cmd, shell=False):
-        rendered = cmd if isinstance(cmd, str) else " ".join(shlex.quote(x) for x in cmd)
-        label = "[DRY-RUN] would run" if self.dry_run else "Running command"
-        print(f"\n{label}:\n")
-        print(rendered)
-        print()
-        if self.dry_run:
-            return True
-        if shell and isinstance(cmd, str):
-            # Use bash with pipefail so failures in any pipeline stage propagate.
-            result = subprocess.run(["bash", "-o", "pipefail", "-c", cmd])
+        print("\nRunning command:\n")
+        if shell:
+            print(cmd)
         else:
-            result = subprocess.run(cmd, shell=shell)
+            print(" ".join(shlex.quote(x) for x in cmd))
+        print()
+
+        result = subprocess.run(cmd, shell=shell)
         return result.returncode == 0
 
     def parse_zstd_level(self, level_text):
@@ -505,9 +536,6 @@ class BackupManager:
         return os.path.join(output_dir, f"{prefix}-{self.timestamp}.{extension}")
 
     def sha256_file(self, filepath):
-        if self.dry_run or not os.path.exists(filepath):
-            return f"{filepath}.sha256 (skipped: dry-run or missing source)"
-
         sha256 = hashlib.sha256()
         with open(filepath, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
@@ -522,8 +550,6 @@ class BackupManager:
         return checksum_path
 
     def rotate_backups(self, output_dir, prefix, extension):
-        if self.dry_run:
-            return [], []
         pattern = os.path.join(output_dir, f"{prefix}-*.{extension}")
         files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
@@ -546,8 +572,6 @@ class BackupManager:
         return keep, remove
 
     def rotate_snapshot_directories(self, base_dir, prefix):
-        if self.dry_run:
-            return [], []
         pattern = os.path.join(base_dir, f"{prefix}-*")
         dirs = [p for p in glob.glob(pattern) if os.path.isdir(p)]
         dirs.sort(key=os.path.getmtime, reverse=True)
@@ -856,12 +880,17 @@ class BackupManager:
             self.ui.show_error(message)
             return False
 
-        cmd = (
-            f"tar -I zstd -xpf {shlex.quote(archive_file)} "
-            f"-C {shlex.quote(restore_target)}"
-        )
+        cmd = [
+            "tar",
+            "-I",
+            "zstd",
+            "-xpf",
+            archive_file,
+            "-C",
+            restore_target,
+        ]
 
-        if self.run_command(cmd, shell=True):
+        if self.run_command(cmd, shell=False):
             self.ui.show_info(
                 f"Archive restored successfully.\n\nTarget:\n{restore_target}\n\n{message}"
             )
@@ -900,42 +929,9 @@ class BackupManager:
 
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="IT_Backupmanager",
-        description="Interactive backup and restore tool (zenity-driven).",
-        add_help=True,
-    )
-    parser.add_argument(
-        "--dry-run",
-        "-n",
-        action="store_true",
-        help="Show the commands that would run without executing them.",
-    )
-    args, _unknown = parser.parse_known_args()
-
-    log_file = _open_log()
-    if log_file is not None:
-        sys.stdout = _Tee(sys.stdout, log_file)
-        sys.stderr = _Tee(sys.stderr, log_file)
-        print(f"=== IT_Backupmanager started at {datetime.now().isoformat()} ===")
-        print(f"argv: {sys.argv}")
-        print(f"uid={os.geteuid()} euid={os.geteuid()} sudo_user={os.environ.get('SUDO_USER')}")
-
     ui = BackupUI()
-    if args.dry_run:
-        print("=" * 60)
-        print("DRY-RUN MODE: no files will be written, no commands executed.")
-        print("=" * 60)
-        ui.show_info(
-            "DRY-RUN MODE\n\nNo files will be written and no commands will be executed.\n"
-            "The terminal will show the commands that would run."
-        )
-
-    manager = BackupManager(ui, dry_run=args.dry_run)
-    if not args.dry_run:
-        manager.require_root()
+    manager = BackupManager(ui)
+    manager.require_root()
 
     config = ui.get_user_input()
     manager.execute(config)
